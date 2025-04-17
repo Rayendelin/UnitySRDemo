@@ -1,0 +1,94 @@
+#pragma kernel Main
+
+#define EdgeThreshold 8.0 / 255.0
+#define EdgeSharpness 2.0
+
+Texture2D<float4> currentRGBLR;
+
+float2 renderSize;
+float2 displaySize;
+SamplerState smpLinearClamp;
+SamplerState smpPointClamp;
+
+RWTexture2D<float4> currentRGBHR;
+
+float fastLanczos2(float x)
+{
+	float wA = x - 4.0;
+	float wB = x * wA - wA;
+	wA *= wA;
+	return wB * wA;
+}
+
+float2 weightY(float dx, float dy, float c, float data)
+{
+	float std = data;
+	float x = ((dx * dx) + (dy * dy)) * 0.5 + clamp(abs(c) * std, 0.0, 1.0);
+	float w = fastLanczos2(x);
+	return float2(w, w * c);
+}
+
+[numthreads(4, 4, 1)]
+void Main(uint3 id : SV_DispatchThreadID)
+{
+    float2 pos_sr = id.xy + float2(0.5, 0.5);
+    float2 uv = pos_sr / displaySize;
+    float4 color = currentRGBLR.SampleLevel(smpLinearClamp, uv, 0);
+
+    // pending whether there is an edge
+    float2 pos_lr = uv * renderSize + float2(-0.5, -0.5);
+    float2 bl_pos_lr = floor(pos_lr);
+    float2 bl_uv = bl_pos_lr / renderSize;
+    float2 pl = bl_pos_lr - pos_lr;
+    float4 left = currentRGBLR.GatherGreen(smpLinearClamp, bl_uv + float2(0, 1 / renderSize.y));
+    float edgeVote = abs(left.z - left.y) + abs(color.y - left.y) + abs(color.y - left.z);
+
+    if (edgeVote > EdgeThreshold) {
+        bl_uv += float2(1 / renderSize.x, 1 / renderSize.y);
+        float4 right = currentRGBLR.GatherGreen(smpLinearClamp, bl_uv + float2(1 / renderSize.x, 0));
+        float4 up_down;
+        up_down.xy = currentRGBLR.GatherGreen(smpLinearClamp, bl_uv + float2(0, 1 / renderSize.y)).xy;
+        up_down.zw = currentRGBLR.GatherGreen(smpLinearClamp, bl_uv + float2(0, -1 / renderSize.y)).zw;
+
+        float mean = (left.y + left.z + right.x + right.w) * 0.25;
+        left = left - float4(mean, mean, mean, mean);
+        right = right - float4(mean, mean, mean, mean);
+        up_down = up_down - float4(mean, mean, mean, mean);
+        color.w = color.y - mean;
+
+        float sum = (((((abs(left.x) + abs(left.y)) + abs(left.z)) + abs(left.w)) +
+                    (((abs(right.x) + abs(right.y)) + abs(right.z)) + abs(right.w))) + 
+                    (((abs(up_down.x) + abs(up_down.y)) + abs(up_down.z)) + abs(up_down.w)));
+        float sum_mean = 1.014185e+01 / sum;
+        float std = sum_mean * sum_mean;
+
+        float data = std;
+        float2 aWY = weightY(pl.x, pl.y+2.0, up_down.x, data);
+		aWY += weightY(pl.x+1.0, pl.y+2.0, up_down.y, data);
+		aWY += weightY(pl.x+1.0, pl.y-1.0, up_down.z, data);
+		aWY += weightY(pl.x, pl.y-1.0, up_down.w, data);			
+		aWY += weightY(pl.x-1.0, pl.y+1.0, left.x, data);
+		aWY += weightY(pl.x, pl.y+1.0, left.y, data);
+		aWY += weightY(pl.x, pl.y, left.z, data);
+		aWY += weightY(pl.x-1.0, pl.y, left.w, data);
+		aWY += weightY(pl.x+1.0, pl.y+1.0, right.x, data);
+		aWY += weightY(pl.x+2.0, pl.y+1.0, right.y, data);
+		aWY += weightY(pl.x+2.0, pl.y, right.z, data);
+		aWY += weightY(pl.x+1.0, pl.y, right.w, data);
+        float finalY = aWY.y / aWY.x;
+
+        float max4 = max(max(left.y, left.z), max(right.x, right.w));
+		float min4 = min(min(left.y, left.z), min(right.x, right.w));
+		finalY = clamp(EdgeSharpness * finalY, min4, max4);
+					
+		float deltaY = finalY - color.w;
+        deltaY = clamp(deltaY, -23.0 / 255.0, 23.0 / 255.0);
+
+		color.x = saturate((color.x + deltaY));
+	    color.y = saturate((color.y + deltaY));
+		color.z = saturate((color.z + deltaY));
+    }
+    
+    color.w = 1.0;
+    currentRGBHR[id.xy] = color;
+}

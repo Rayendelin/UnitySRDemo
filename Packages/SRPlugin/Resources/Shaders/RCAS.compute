@@ -1,0 +1,46 @@
+#pragma kernel Main
+
+#define FSR_RCAS_LIMIT (0.25 - (1.0 / 16.0))
+
+Texture2D<float4> inputTexture;
+
+float2 displaySize;
+SamplerState smpLinearClamp;
+SamplerState smpPointClamp;
+
+RWTexture2D<float4> outputTexture;
+
+[numthreads(4, 4, 1)]
+void Main(uint3 id : SV_DispatchThreadID)
+{
+    float scale = 1.0;
+    float sharpness = exp2(-scale);
+    
+    //   b
+    // d e f
+    //   h
+    float3 color_b = inputTexture[id.xy + uint2(0, 1)].xyz;
+    float3 color_d = inputTexture[id.xy + uint2(-1, 0)].xyz;
+    float3 color_e = inputTexture[id.xy + uint2(0, 0)].xyz;
+    float3 color_f = inputTexture[id.xy + uint2(1, 0)].xyz;
+    float3 color_h = inputTexture[id.xy + uint2(0, -1)].xyz;
+
+    float luma_b = 0.5 * color_b.x + color_b.y + 0.5 * color_b.z;
+    float luma_d = 0.5 * color_d.x + color_d.y + 0.5 * color_d.z;
+    float luma_e = 0.5 * color_e.x + color_e.y + 0.5 * color_e.z;
+    float luma_f = 0.5 * color_f.x + color_f.y + 0.5 * color_f.z;
+    float luma_h = 0.5 * color_h.x + color_h.y + 0.5 * color_h.z;
+
+    float nz = 0.25 * (luma_b + luma_d + luma_f + luma_h) - luma_e;
+    nz = saturate(abs(nz) / (max(luma_b, max(luma_d, max(luma_f, max(luma_h, luma_e)))) - min(luma_b, min(luma_d, min(luma_f, min(luma_h, luma_e))))));
+    nz = -0.5 * nz + 1.0;
+
+    float3 min_color = min(color_b, min(color_d, min(color_f, color_h)));
+    float3 max_color = max(color_b, max(color_d, max(color_f, color_h)));
+    float3 hit_min_color = min_color / (4 * max_color);
+    float3 hit_max_color = (1 - max_color) / (4 * min_color - 4);
+    float3 lobe_color = max(-hit_min_color, hit_max_color);
+    float lobe = max(-FSR_RCAS_LIMIT, min(max(lobe_color.x, max(lobe_color.y, lobe_color.z)), 0.0)) * sharpness;
+
+    outputTexture[id.xy] = float4((lobe * (color_b + color_d + color_f + color_h) + color_e) / (4 * lobe + 1), 1.0);
+}

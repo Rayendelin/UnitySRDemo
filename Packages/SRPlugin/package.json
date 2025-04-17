@@ -1,0 +1,11 @@
+{
+    "name": "com.tencent.srplugin",
+    "displayName": "SRPlugin",
+    "version": "0.0.1",
+    "unity": "2022.3",
+    "description": "SRPlugin is a tool for Unity to enable super-resolution feature.",
+    "keywords": [],
+    "author": "tencent",
+    "dependencies": {},
+    "samples": []
+}

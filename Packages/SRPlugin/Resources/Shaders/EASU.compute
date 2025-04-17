@@ -1,0 +1,159 @@
+#pragma kernel Main
+
+Texture2D<float4> currentRGBLR;
+
+float2 renderSize;
+float2 displaySize;
+SamplerState smpLinearClamp;
+SamplerState smpPointClamp;
+
+RWTexture2D<float4> currentRGBHR;
+
+float4 EASUSet(float2 pl, bool biS, bool biT, bool biU, bool biV, float luma_a, float luma_b, float luma_c, float luma_d, float luma_e)
+{
+    // dir.x, dir.y, len
+    float4 ret = float4(0.0, 0.0, 0.0, 0.0);
+
+    // s t
+    // u v
+    float weight = 0.0;
+    if (biS) weight = (1.0 - pl.x) * pl.y;
+    if (biT) weight = pl.x * pl.y;
+    if (biU) weight = (1.0 - pl.x) * (1.0 - pl.y);
+    if (biV) weight = pl.x * (1.0 - pl.y);
+    //   a
+    // b c d
+    //   e
+    float dc = luma_d - luma_c;
+    float cb = luma_c - luma_b;
+    float len_x = max(abs(dc), abs(cb));
+    len_x = 1 / len_x;
+    float dir_x = luma_d - luma_b;
+    ret.x = dir_x * weight;
+    len_x = saturate(abs(dir_x) * len_x);
+    len_x = len_x * len_x;
+    ret.z += len_x * weight;
+    // repeat for the y axis
+    float ec = luma_e - luma_c;
+    float ca = luma_c - luma_a;
+    float len_y = max(abs(ec), abs(ca));
+    len_y = 1 / len_y;
+    float dir_y = luma_e - luma_a;
+    ret.y = dir_y * weight;
+    len_y = saturate(abs(dir_y) * len_y);
+    len_y = len_y * len_y;
+    ret.z += len_y * weight;
+
+    return ret;
+}
+
+float4 EASUTap(float2 off, float2 dir, float2 len, float lob, float clp, float3 c)
+{
+    float2 v;
+    v.x = off.x * dir.x + off.y * dir.y;
+    v.y = off.x * (-dir.y) + off.y * dir.x;
+    v *= len;
+    float d2 = v.x * v.x + v.y * v.y;
+    d2 = min(d2, clp);
+    float wb = 2.0 / 5.0 * d2 - 1.0;
+    float wa = lob * d2 - 1.0;
+    wb = wb * wb;
+    wa = wa * wa;
+    wb = 25.0 / 16.0 * wb - (25.0 / 16.0 - 1.0);
+    float w = wb * wa;
+
+    return float4(c * w, w);
+}
+
+[numthreads(4, 4, 1)]
+void Main(uint3 id : SV_DispatchThreadID)
+{
+    float2 pos_sr = id.xy + float2(0.5, 0.5);
+    float2 uv = pos_sr / displaySize;
+    float4 color = currentRGBLR.SampleLevel(smpLinearClamp, uv, 0);
+
+    float2 pos_lr = uv * renderSize + float2(-0.5, -0.5);
+    float2 bl_pos_lr = floor(pos_lr);
+    float2 bl_uv = bl_pos_lr / renderSize;
+    float2 pl = pos_lr - bl_pos_lr;
+
+    //   n o
+    // i j k l
+    // e f g h
+    //   b c
+    float4 bczzR = currentRGBLR.GatherRed(smpPointClamp, bl_uv + float2(1 / renderSize.x, -1 / renderSize.y));
+    float4 bczzG = currentRGBLR.GatherGreen(smpPointClamp, bl_uv + float2(1 / renderSize.x, -1 / renderSize.y));
+    float4 bczzB = currentRGBLR.GatherBlue(smpPointClamp, bl_uv + float2(1 / renderSize.x, -1 / renderSize.y));
+    float4 ijfeR = currentRGBLR.GatherRed(smpPointClamp, bl_uv + float2(0, 1 / renderSize.y));
+    float4 ijfeG = currentRGBLR.GatherGreen(smpPointClamp, bl_uv + float2(0, 1 / renderSize.y));
+    float4 ijfeB = currentRGBLR.GatherBlue(smpPointClamp, bl_uv + float2(0, 1 / renderSize.y));
+    float4 klhgR = currentRGBLR.GatherRed(smpPointClamp, bl_uv + float2(2 / renderSize.x, 1 / renderSize.y));
+    float4 klhgG = currentRGBLR.GatherGreen(smpPointClamp, bl_uv + float2(2 / renderSize.x, 1 / renderSize.y));
+    float4 klhgB = currentRGBLR.GatherBlue(smpPointClamp, bl_uv + float2(2 / renderSize.x, 1 / renderSize.y));
+    float4 zzonR = currentRGBLR.GatherRed(smpPointClamp, bl_uv + float2(1 / renderSize.x, 3 / renderSize.y));
+    float4 zzonG = currentRGBLR.GatherGreen(smpPointClamp, bl_uv + float2(1 / renderSize.x, 3 / renderSize.y));
+    float4 zzonB = currentRGBLR.GatherBlue(smpPointClamp, bl_uv + float2(1 / renderSize.x, 3 / renderSize.y));
+    
+    float4 bczzL = bczzR * 0.5 + bczzG + bczzB * 0.5;
+    float4 ijfeL = ijfeR * 0.5 + ijfeG + ijfeB * 0.5;
+    float4 klhgL = klhgR * 0.5 + klhgG + klhgB * 0.5;
+    float4 zzonL = zzonR * 0.5 + zzonG + zzonB * 0.5;
+
+    float4 dir_and_len = float4(0.0, 0.0, 0.0, 0.0);
+    //   n
+    // i j k
+    //   f
+    dir_and_len += EASUSet(pl, true, false, false, false, zzonL.w, ijfeL.x, ijfeL.y, klhgL.x, ijfeL.z);
+    //   o
+    // j k l
+    //   g
+    dir_and_len += EASUSet(pl, false, true, false, false, zzonL.z, ijfeL.y, klhgL.x, klhgL.y, klhgL.w);
+    //   j
+    // e f g
+    //   b
+    dir_and_len += EASUSet(pl, false, false, true, false, ijfeL.y, ijfeL.w, ijfeL.z, klhgL.w, bczzL.x);
+    //   k
+    // f g h
+    //   c
+    dir_and_len += EASUSet(pl, false, false, false, true, klhgL.x, ijfeL.z, klhgL.w, klhgL.z, bczzL.y);
+
+    float2 dir = dir_and_len.xy;
+    float len = dir_and_len.z;
+    float2 dir2 = dir * dir;
+    float dirR = dir2.x + dir2.y;
+    bool zero = dirR < (1.0 / 32768.0);
+    dirR = 1.0 / sqrt(dirR);
+    dirR = zero ? 1.0 : dirR;
+    dir.x = zero ? 1.0 : dir.x;
+    dir *= dirR;
+    len = len * 0.5;
+    len *= len;
+    float stretch = (dir.x * dir.x + dir.y * dir.y) / max(abs(dir.x), abs(dir.y));
+    float2 len2 = float2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    float lob = 0.5 + (1.0 / 4.0 - 0.04 - 0.5) * len;
+    float clp = 1 / lob;
+
+    // j k
+    // f g
+    float3 min4 = min(min(min(float3(ijfeR.z, ijfeG.z, ijfeB.z), float3(klhgR.x, klhgG.x, klhgB.x)), float3(ijfeR.z, ijfeG.z, ijfeB.z)),
+                  float3(klhgR.w, klhgG.w, klhgB.w));
+    float3 max4 = max(max(max(float3(ijfeR.z, ijfeG.z, ijfeB.z), float3(klhgR.x, klhgG.x, klhgB.x)), float3(ijfeR.z, ijfeG.z, ijfeB.z)),
+                  float3(klhgR.w, klhgG.w, klhgB.w));
+
+    float4 color_and_weight = float4(0.0, 0.0, 0.0, 0.0);
+    color_and_weight += EASUTap(float2(0.0, -1.0) - pl, dir, len2, lob, clp, float3(bczzR.x, bczzG.x, bczzB.x));
+    color_and_weight += EASUTap(float2(1.0, -1.0) - pl, dir, len2, lob, clp, float3(bczzR.y, bczzG.y, bczzB.y));
+    color_and_weight += EASUTap(float2(-1.0, 1.0) - pl, dir, len2, lob, clp, float3(ijfeR.x, ijfeG.x, ijfeB.x));
+    color_and_weight += EASUTap(float2(0.0, 1.0) - pl, dir, len2, lob, clp, float3(ijfeR.y, ijfeG.y, ijfeB.y));
+    color_and_weight += EASUTap(float2(0.0, 0.0) - pl, dir, len2, lob, clp, float3(ijfeR.z, ijfeG.z, ijfeB.z));
+    color_and_weight += EASUTap(float2(-1.0, 0.0) - pl, dir, len2, lob, clp, float3(ijfeR.w, ijfeG.w, ijfeB.w));
+    color_and_weight += EASUTap(float2(1.0, 1.0) - pl, dir, len2, lob, clp, float3(klhgR.x, klhgG.x, klhgB.x));
+    color_and_weight += EASUTap(float2(2.0, 1.0) - pl, dir, len2, lob, clp, float3(klhgR.y, klhgG.y, klhgB.y));
+    color_and_weight += EASUTap(float2(2.0, 0.0) - pl, dir, len2, lob, clp, float3(klhgR.z, klhgG.z, klhgB.z));
+    color_and_weight += EASUTap(float2(1.0, 0.0) - pl, dir, len2, lob, clp, float3(klhgR.w, klhgG.w, klhgB.w));
+    color_and_weight += EASUTap(float2(1.0, 2.0) - pl, dir, len2, lob, clp, float3(zzonR.z, zzonG.z, zzonB.z));
+    color_and_weight += EASUTap(float2(0.0, 2.0) - pl, dir, len2, lob, clp, float3(zzonR.w, zzonG.w, zzonB.w));
+
+    float3 final_color = min(max4, max(min4, color_and_weight.xyz / color_and_weight.w));
+    currentRGBHR[id.xy] = float4(final_color, 1.0);
+}
